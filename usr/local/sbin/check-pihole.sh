@@ -32,8 +32,8 @@ if ! /usr/bin/dig \
     +time=2 \
     +tries=1 \
     @127.0.0.1 \
-    -p 5335 \
-    example.com \
+    -p 53 \
+    dns-test.moserlab.de \
     A >/dev/null 2>&1
 then
     exit 1
@@ -48,8 +48,8 @@ if ! /usr/bin/dig \
     +time=2 \
     +tries=1 \
     @::1 \
-    -p 5335 \
-    example.com \
+    -p 53 \
+    dns-test.moserlab.de \
     AAAA >/dev/null 2>&1
 then
     exit 1
