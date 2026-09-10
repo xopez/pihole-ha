@@ -32,6 +32,7 @@ if ! /usr/bin/dig \
     +time=2 \
     +tries=1 \
     @127.0.0.1 \
+    -p 5335 \
     example.com \
     A >/dev/null 2>&1
 then
@@ -47,6 +48,7 @@ if ! /usr/bin/dig \
     +time=2 \
     +tries=1 \
     @::1 \
+    -p 5335 \
     example.com \
     AAAA >/dev/null 2>&1
 then
