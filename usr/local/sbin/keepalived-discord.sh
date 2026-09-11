@@ -2,27 +2,21 @@
 
 WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"
 
-TYPE="$1"
-NAME="$2"
-STATE="$3"
+NAME="$1"
+STATE="$2"
 HOST="$(hostname)"
 
 case "$STATE" in
     MASTER)
+        TEXT="${HOST} is now MASTER"
         COLOR=3066993
-        TEXT="ist jetzt MASTER"
         ;;
     BACKUP)
+        TEXT="${HOST} is now BACKUP"
         COLOR=16776960
-        TEXT="ist jetzt BACKUP"
-        ;;
-    FAULT)
-        COLOR=15158332
-        TEXT="ist in FAULT"
         ;;
     *)
-        COLOR=9807270
-        TEXT="hat den Zustand geändert: $STATE"
+        exit 0
         ;;
 esac
 
@@ -30,18 +24,13 @@ curl -sS -X POST "$WEBHOOK_URL" \
     -H "Content-Type: application/json" \
     -d "{
         \"embeds\": [{
-            \"title\": \"Keepalived Zustandsänderung\",
-            \"description\": \"**${HOST}** ${TEXT}\",
+            \"title\": \"Keepalived State Change\",
+            \"description\": \"${TEXT}\",
             \"color\": ${COLOR},
             \"fields\": [
                 {
                     \"name\": \"VRRP Instance\",
                     \"value\": \"${NAME}\",
-                    \"inline\": true
-                },
-                {
-                    \"name\": \"Typ\",
-                    \"value\": \"${TYPE}\",
                     \"inline\": true
                 }
             ]
