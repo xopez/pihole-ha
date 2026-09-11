@@ -2,8 +2,7 @@
 
 WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"
 
-NAME="$1"
-STATE="$2"
+STATE="$1"
 HOST="$(hostname)"
 
 case "$STATE" in
@@ -26,13 +25,6 @@ curl -sS -X POST "$WEBHOOK_URL" \
         \"embeds\": [{
             \"title\": \"Keepalived State Change\",
             \"description\": \"${TEXT}\",
-            \"color\": ${COLOR},
-            \"fields\": [
-                {
-                    \"name\": \"VRRP Instance\",
-                    \"value\": \"${NAME}\",
-                    \"inline\": true
-                }
-            ]
+            \"color\": ${COLOR}
         }]
     }"
