@@ -4,17 +4,20 @@ WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"
 
 STATE="$1"
 
-HOST="$(hostname)"
+HOST="$(/bin/hostname)"
 INSTANCE="PIHOLE"
 
-INTERFACE="$(ip route show default | awk 'NR==1 {print $5}')"
+INTERFACE="$(
+    /sbin/ip -o route show default |
+    /usr/bin/awk 'NR==1 {print $5}'
+)"
 
 if [[ -z "$INTERFACE" ]]; then
     INTERFACE="unknown"
 fi
 
 PRIORITY="$(
-    awk -v instance="$INSTANCE" '
+    /usr/bin/awk -v instance="$INSTANCE" '
         $1 == "vrrp_instance" && $2 == instance { found=1 }
         found && $1 == "priority" {
             print $2
@@ -24,21 +27,21 @@ PRIORITY="$(
 )"
 
 IPV4="$(
-    ip -4 addr show dev "$INTERFACE" scope global |
-    awk '/inet / {print $2}' |
-    head -n1
+    /sbin/ip -4 -o addr show dev "$INTERFACE" |
+    /usr/bin/awk '$3 == "inet" && $4 !~ /^127\./ {print $4}' |
+    /usr/bin/head -n1
 )"
 
 IPV6="$(
-    ip -6 addr show dev "$INTERFACE" scope global |
-    awk '/inet6 / && $2 !~ /^fe80:/ {print $2}' |
-    head -n1
+    /sbin/ip -6 -o addr show dev "$INTERFACE" |
+    /usr/bin/awk '$3 == "inet6" && $4 !~ /^fe80:/ {print $4}' |
+    /usr/bin/head -n1
 )"
 
 VIPV4="10.5.5.2/24"
 VIPV6="fd00:5::2/64"
 
-TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+TIMESTAMP="$(/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 case "$STATE" in
     MASTER)
@@ -56,7 +59,7 @@ case "$STATE" in
         ;;
 esac
 
-curl -sS -X POST "$WEBHOOK_URL" \
+/usr/bin/curl -sS -X POST "$WEBHOOK_URL" \
     -H "Content-Type: application/json" \
     -d "{
         \"embeds\": [{
