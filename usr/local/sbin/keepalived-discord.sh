@@ -1,6 +1,6 @@
 #!/bin/bash
 
-WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"
+WEBHOOK_URL=""
 
 STATE="$1"
 
