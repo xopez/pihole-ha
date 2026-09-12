@@ -2,115 +2,32 @@
 
 set -u
 
+# ============================================================================
+# Configuration
+# ============================================================================
+
 WEBHOOK_URL=""
 CONFIG="/etc/keepalived/keepalived.conf"
-INSTANCE="PIHOLE"
+
+# ============================================================================
+# Validate arguments
+# ============================================================================
 
 STATE="${1:-}"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-die() {
-    exit 1
-}
-
-# Extract a property from the requested vrrp_instance block.
-vrrp_value() {
-    local key="$1"
-
-    awk -v instance="$INSTANCE" -v key="$key" '
-        $1 == "vrrp_instance" && $2 == instance {
-            in_instance=1
-            depth=0
-        }
-
-        in_instance {
-            for (i = 1; i <= NF; i++) {
-                if ($i == "{") depth++
-                if ($i == "}") depth--
-            }
-
-            if ($1 == key && NF >= 2) {
-                print $2
-                exit
-            }
-
-            if (depth <= 0 && $0 ~ /}/)
-                exit
-        }
-    ' "$CONFIG"
-}
-
-# Extract all addresses from a virtual_ipaddress* block belonging to
-# the requested vrrp_instance.
-vrrp_ips() {
-    local block="$1"
-
-    awk -v instance="$INSTANCE" -v target="$block" '
-        $1 == "vrrp_instance" && $2 == instance {
-            in_instance=1
-            depth=0
-        }
-
-        in_instance {
-            # Enter the requested block.
-            if ($1 == target) {
-                in_block=1
-                block_depth=0
-            }
-
-            if (in_block) {
-                for (i = 1; i <= NF; i++) {
-                    if ($i == "{") block_depth++
-                    if ($i == "}") block_depth--
-                }
-
-                # Ignore the "virtual_ipaddress {" line itself.
-                if ($1 != target && $1 != "{") {
-                    for (i = 1; i <= NF; i++) {
-                        value=$i
-
-                        # Ignore interface/option syntax.
-                        if (value ~ /^[0-9a-fA-F:.]+\/[0-9]+$/)
-                            print value
-                    }
-                }
-
-                if (block_depth <= 0 && $0 ~ /}/) {
-                    in_block=0
-                }
-            }
-
-            for (i = 1; i <= NF; i++) {
-                if ($i == "{") depth++
-                if ($i == "}") depth--
-            }
-
-            if (depth <= 0 && $0 ~ /}/)
-                exit
-        }
-    ' "$CONFIG"
-}
-
-# ---------------------------------------------------------------------------
-# Validate state
-# ---------------------------------------------------------------------------
 
 case "$STATE" in
     MASTER)
         TITLE="🟢 Keepalived — MASTER"
-        TEXT="**${HOST:-unknown}** is now the active Pi-hole node."
         COLOR=5763719
         STATUS="🟢 MASTER"
+        TEXT="is now the active Pi-hole node."
         ;;
 
     BACKUP)
         TITLE="🟡 Keepalived — BACKUP"
-        TEXT="**${HOST:-unknown}** is now the standby Pi-hole node."
         COLOR=16776960
         STATUS="🟡 BACKUP"
+        TEXT="is now the standby Pi-hole node."
         ;;
 
     *)
@@ -118,170 +35,361 @@ case "$STATE" in
         ;;
 esac
 
-[[ -n "$WEBHOOK_URL" ]] || die
-[[ -r "$CONFIG" ]] || die
+[[ -n "$WEBHOOK_URL" ]] || exit 1
+[[ -r "$CONFIG" ]] || exit 1
+[[ -x "$(command -v jq)" ]] || exit 1
+[[ -x "$(command -v curl)" ]] || exit 1
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # Basic system information
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 HOST="$(hostname)"
 
-INTERFACE="$(
-    ip -o route show default |
+# Interface from the default route.
+DEFAULT_INTERFACE="$(
+    ip -o route show default 2>/dev/null |
         awk 'NR == 1 { print $5; exit }'
 )"
 
-INTERFACE="${INTERFACE:-unknown}"
+DEFAULT_INTERFACE="${DEFAULT_INTERFACE:-unknown}"
 
-# ---------------------------------------------------------------------------
-# Keepalived / VRRP configuration
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Parse all VRRP instances
+#
+# Expected structure:
+#
+# vrrp_instance PIHOLE_V4 {
+#     state MASTER
+#     interface eth0
+#     virtual_router_id 51
+#     priority 150
+#
+#     virtual_ipaddress {
+#         10.5.5.2/24
+#     }
+# }
+#
+# vrrp_instance PIHOLE_V6 {
+#     ...
+# }
+# ============================================================================
 
-VRRP_INTERFACE="$(vrrp_value interface)"
-PRIORITY="$(vrrp_value priority)"
-VRRP_STATE="$(vrrp_value state)"
+VRRP_DATA="$(
+    awk '
+        function trim(s) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+            return s
+        }
 
-VRRP_INTERFACE="${VRRP_INTERFACE:-$INTERFACE}"
-PRIORITY="${PRIORITY:-unknown}"
-VRRP_STATE="${VRRP_STATE:-unknown}"
+        # New VRRP instance
+        /^[[:space:]]*vrrp_instance[[:space:]]+/ {
+            if (instance != "")
+                print instance "|" state "|" interface "|" vrid "|" priority "|" vip4 "|" vip6
 
-# Prefer the interface explicitly configured for this VRRP instance.
-# Fall back to the default route interface.
-if [[ "$VRRP_INTERFACE" != "unknown" ]]; then
-    INTERFACE="$VRRP_INTERFACE"
-fi
+            instance=$2
+            gsub(/\{/, "", instance)
 
-# ---------------------------------------------------------------------------
-# Local IP addresses
-# ---------------------------------------------------------------------------
+            state=""
+            interface=""
+            vrid=""
+            priority=""
+            vip4=""
+            vip6=""
+            in_instance=1
+            instance_depth=0
+            in_vip=0
+            next
+        }
 
-# All IPv4 addresses except loopback.
+        in_instance {
+
+            # ------------------------------------------------------------
+            # Track braces
+            # ------------------------------------------------------------
+
+            line=$0
+
+            opens=gsub(/\{/, "{", line)
+            closes=gsub(/\}/, "}", line)
+
+            instance_depth += opens
+            instance_depth -= closes
+
+            # ------------------------------------------------------------
+            # Basic VRRP parameters
+            # ------------------------------------------------------------
+
+            if ($1 == "state")
+                state=$2
+
+            if ($1 == "interface")
+                interface=$2
+
+            if ($1 == "virtual_router_id")
+                vrid=$2
+
+            if ($1 == "priority")
+                priority=$2
+
+            # ------------------------------------------------------------
+            # virtual_ipaddress block
+            # ------------------------------------------------------------
+
+            if ($1 == "virtual_ipaddress" && $2 == "{") {
+                in_vip=1
+                next
+            }
+
+            if (in_vip && $1 == "}") {
+                in_vip=0
+                next
+            }
+
+            if (in_vip) {
+                ip=$1
+                sub(/[[:space:]].*$/, "", ip)
+
+                # IPv4
+                if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\//) {
+                    if (vip4 == "")
+                        vip4=ip
+                    else
+                        vip4=vip4 ", " ip
+                }
+
+                # IPv6
+                else if (ip ~ /:/) {
+                    if (vip6 == "")
+                        vip6=ip
+                    else
+                        vip6=vip6 ", " ip
+                }
+            }
+
+            # ------------------------------------------------------------
+            # End of VRRP instance
+            # ------------------------------------------------------------
+
+            if (instance_depth <= 0 && $0 ~ /}/) {
+                print instance "|" state "|" interface "|" vrid "|" priority "|" vip4 "|" vip6
+
+                instance=""
+                state=""
+                interface=""
+                vrid=""
+                priority=""
+                vip4=""
+                vip6=""
+                in_instance=0
+                in_vip=0
+            }
+        }
+
+        END {
+            if (instance != "")
+                print instance "|" state "|" interface "|" vrid "|" priority "|" vip4 "|" vip6
+        }
+    ' "$CONFIG"
+)"
+
+# Remove empty lines.
+VRRP_DATA="$(
+    printf '%s\n' "$VRRP_DATA" |
+        sed '/^[[:space:]]*$/d'
+)"
+
+# ============================================================================
+# VRRP summary
+# ============================================================================
+
+VRRP_INSTANCES="$(
+    printf '%s\n' "$VRRP_DATA" |
+        cut -d'|' -f1 |
+        paste -sd ', ' -
+)"
+
+VRRP_INSTANCES="${VRRP_INSTANCES:-unknown}"
+
+# ============================================================================
+# Build per-instance display
+# ============================================================================
+
+VRRP_STATUS=""
+
+while IFS='|' read -r INSTANCE STATE_CONFIG VRRP_INTERFACE VRID PRIORITY VIP4 VIP6; do
+
+    [[ -n "$INSTANCE" ]] || continue
+
+    VRRP_STATUS+="${INSTANCE}"$'\n'
+    VRRP_STATUS+="  State       : ${STATE_CONFIG:-unknown}"$'\n'
+    VRRP_STATUS+="  Interface   : ${VRRP_INTERFACE:-unknown}"$'\n'
+    VRRP_STATUS+="  VRID        : ${VRID:-unknown}"$'\n'
+    VRRP_STATUS+="  Priority    : ${PRIORITY:-unknown}"$'\n'
+    VRRP_STATUS+="  IPv4 VIP    : ${VIP4:-none}"$'\n'
+    VRRP_STATUS+="  IPv6 VIP    : ${VIP6:-none}"$'\n'
+    VRRP_STATUS+=$'\n'
+
+done <<< "$VRRP_DATA"
+
+VRRP_STATUS="${VRRP_STATUS%$'\n'}"
+VRRP_STATUS="${VRRP_STATUS:-unknown}"
+
+# ============================================================================
+# Local IPv4 addresses
+# ============================================================================
+
 IPV4="$(
-    ip -4 -o addr show dev "$INTERFACE" |
-        awk '$3 == "inet" && $4 !~ /^127\./ { print $4 }' |
-        paste -sd ', ' -
+    ip -4 -o addr show scope global 2>/dev/null |
+        awk '
+            {
+                interface=$2
+                address=$4
+
+                printf "%s: %s\n", interface, address
+            }
+        ' |
+        paste -sd '\n' -
 )"
 
-# All IPv6 addresses except link-local.
+IPV4="${IPV4:-none}"
+
+# ============================================================================
+# Local IPv6 addresses
+# ============================================================================
+
 IPV6="$(
-    ip -6 -o addr show dev "$INTERFACE" |
-        awk '$3 == "inet6" && $4 !~ /^fe80:/ { print $4 }' |
+    ip -6 -o addr show scope global 2>/dev/null |
+        awk '
+            {
+                interface=$2
+                address=$4
+
+                printf "%s: %s\n", interface, address
+            }
+        ' |
+        paste -sd '\n' -
+)"
+
+IPV6="${IPV6:-none}"
+
+# ============================================================================
+# Currently active VRRP VIPs
+#
+# This is intentionally taken from "ip addr", not only from the config.
+# This tells us which VIPs are ACTUALLY present on the current node.
+# ============================================================================
+
+ACTIVE_VIPV4="$(
+    ip -4 -o addr show 2>/dev/null |
+        awk '
+            /scope global/ && /10\.5\.5\.2\// {
+                print $4
+            }
+        ' |
         paste -sd ', ' -
 )"
 
-IPV4="${IPV4:-unknown}"
-IPV6="${IPV6:-unknown}"
-
-# ---------------------------------------------------------------------------
-# Virtual IP addresses from keepalived.conf
-# ---------------------------------------------------------------------------
-
-# Normal VRRP virtual addresses.
-VIPV4="$(
-    vrrp_ips "virtual_ipaddress" |
-        awk -F/ '$1 !~ /:/ { print }' |
+ACTIVE_VIPV6="$(
+    ip -6 -o addr show 2>/dev/null |
+        awk '
+            /scope global/ && /fd00:5::2\// {
+                print $4
+            }
+        ' |
         paste -sd ', ' -
 )"
 
-VIPV6="$(
-    vrrp_ips "virtual_ipaddress" |
-        awk -F/ '$1 ~ /:/ { print }' |
-        paste -sd ', ' -
-)"
+ACTIVE_VIPV4="${ACTIVE_VIPV4:-none}"
+ACTIVE_VIPV6="${ACTIVE_VIPV6:-none}"
 
-# Also include addresses from virtual_ipaddress_excluded if present.
-VIPV4_EXCLUDED="$(
-    vrrp_ips "virtual_ipaddress_excluded" |
-        awk -F/ '$1 !~ /:/ { print }' |
-        paste -sd ', ' -
-)"
-
-VIPV6_EXCLUDED="$(
-    vrrp_ips "virtual_ipaddress_excluded" |
-        awk -F/ '$1 ~ /:/ { print }' |
-        paste -sd ', ' -
-)"
-
-[[ -n "$VIPV4_EXCLUDED" ]] && \
-    VIPV4="${VIPV4:+$VIPV4, }$VIPV4_EXCLUDED"
-
-[[ -n "$VIPV6_EXCLUDED" ]] && \
-    VIPV6="${VIPV6:+$VIPV6, }$VIPV6_EXCLUDED"
-
-VIPV4="${VIPV4:-none}"
-VIPV6="${VIPV6:-none}"
+# ============================================================================
+# Timestamp
+# ============================================================================
 
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-# ---------------------------------------------------------------------------
-# Build Discord payload with jq
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Discord payload
+# ============================================================================
 
 jq -n \
     --arg title "$TITLE" \
-    --arg description "$TEXT" \
+    --arg description "**${HOST}** ${TEXT}" \
     --arg status "$STATUS" \
     --arg host "$HOST" \
-    --arg interface "$INTERFACE" \
-    --arg instance "$INSTANCE" \
-    --arg priority "$PRIORITY" \
-    --arg configured_state "$VRRP_STATE" \
+    --arg interface "$DEFAULT_INTERFACE" \
+    --arg instances "$VRRP_INSTANCES" \
+    --arg vrrp_status "$VRRP_STATUS" \
     --arg ipv4 "$IPV4" \
     --arg ipv6 "$IPV6" \
-    --arg vipv4 "$VIPV4" \
-    --arg vipv6 "$VIPV6" \
+    --arg active_vipv4 "$ACTIVE_VIPV4" \
+    --arg active_vipv6 "$ACTIVE_VIPV6" \
     --arg timestamp "$TIMESTAMP" \
     --argjson color "$COLOR" \
     '{
-        embeds: [{
-            title: $title,
-            description: $description,
-            color: $color,
+        embeds: [
+            {
+                title: $title,
+                description: $description,
+                color: $color,
 
-            fields: [
-                {
-                    name: "📊 STATUS",
-                    value: (
-                        "```text\n" +
-                        "State       : " + $status + "\n" +
-                        "Host        : " + $host + "\n" +
-                        "Interface   : " + $interface + "\n" +
-                        "VRRP        : " + $instance + "\n" +
-                        "Priority    : " + $priority + "\n" +
-                        "Config State: " + $configured_state + "\n" +
-                        "```"
-                    ),
-                    inline: false
+                fields: [
+                    {
+                        name: "📊 STATUS",
+                        value: (
+                            "```text\n" +
+                            "State       : " + $status + "\n" +
+                            "Host        : " + $host + "\n" +
+                            "Interface   : " + $interface + "\n" +
+                            "VRRP        : " + $instances + "\n" +
+                            "```"
+                        ),
+                        inline: false
+                    },
+
+                    {
+                        name: "🔄 VRRP INSTANCES",
+                        value: (
+                            "```text\n" +
+                            $vrrp_status +
+                            "\n```"
+                        ),
+                        inline: false
+                    },
+
+                    {
+                        name: "🌐 NETWORK",
+                        value: (
+                            "```text\n" +
+                            "IPv4:\n" +
+                            $ipv4 +
+                            "\n\nIPv6:\n" +
+                            $ipv6 +
+                            "\n```"
+                        ),
+                        inline: false
+                    },
+
+                    {
+                        name: "🔗 ACTIVE VIRTUAL IPs",
+                        value: (
+                            "```text\n" +
+                            "IPv4        : " + $active_vipv4 + "\n" +
+                            "IPv6        : " + $active_vipv6 + "\n" +
+                            "```"
+                        ),
+                        inline: false
+                    }
+                ],
+
+                footer: {
+                    text: "Pi-hole HA • Keepalived"
                 },
-                {
-                    name: "🌐 NETWORK",
-                    value: (
-                        "```text\n" +
-                        "IPv4        : " + $ipv4 + "\n" +
-                        "IPv6        : " + $ipv6 + "\n" +
-                        "```"
-                    ),
-                    inline: false
-                },
-                {
-                    name: "🔗 VIRTUAL IPs",
-                    value: (
-                        "```text\n" +
-                        "IPv4        : " + $vipv4 + "\n" +
-                        "IPv6        : " + $vipv6 + "\n" +
-                        "```"
-                    ),
-                    inline: false
-                }
-            ],
 
-            footer: {
-                text: "Pi-hole HA • Keepalived"
-            },
-
-            timestamp: $timestamp
-        }]
+                timestamp: $timestamp
+            }
+        ]
     }' |
     curl \
         --fail \
