@@ -45,14 +45,16 @@ TIMESTAMP="$(/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 case "$STATE" in
     MASTER)
-        TITLE="🟢 Keepalived: MASTER"
-        TEXT="${HOST} is now MASTER"
-        COLOR=3066993
+        TITLE="🟢 Keepalived — MASTER"
+        TEXT="**${HOST}** is now the active Pi-hole node."
+        COLOR=5763719
+        STATUS="🟢 MASTER"
         ;;
     BACKUP)
-        TITLE="🟡 Keepalived: BACKUP"
-        TEXT="${HOST} is now BACKUP"
+        TITLE="🟡 Keepalived — BACKUP"
+        TEXT="**${HOST}** is now the standby Pi-hole node."
         COLOR=16776960
+        STATUS="🟡 BACKUP"
         ;;
     *)
         exit 0
@@ -68,48 +70,23 @@ esac
             \"color\": ${COLOR},
             \"fields\": [
                 {
-                    \"name\": \"Host\",
-                    \"value\": \"\`${HOST}\`\",
-                    \"inline\": true
+                    \"name\": \"📊 STATUS\",
+                    \"value\": \"\`\`\`text\nState       : ${STATUS}\nHost        : ${HOST}\nInterface   : ${INTERFACE}\nVRRP        : ${INSTANCE}\nPriority    : ${PRIORITY:-unknown}\n\`\`\`\",
+                    \"inline\": false
                 },
                 {
-                    \"name\": \"Interface\",
-                    \"value\": \"\`${INTERFACE}\`\",
-                    \"inline\": true
+                    \"name\": \"🌐 NETWORK\",
+                    \"value\": \"\`\`\`text\nIPv4        : ${IPV4:-unknown}\nIPv6        : ${IPV6:-unknown}\n\`\`\`\",
+                    \"inline\": false
                 },
                 {
-                    \"name\": \"VRRP Instance\",
-                    \"value\": \"\`${INSTANCE}\`\",
-                    \"inline\": true
-                },
-                {
-                    \"name\": \"Priority\",
-                    \"value\": \"\`${PRIORITY:-unknown}\`\",
-                    \"inline\": true
-                },
-                {
-                    \"name\": \"IPv4 VIP\",
-                    \"value\": \"\`${VIPV4}\`\",
-                    \"inline\": true
-                },
-                {
-                    \"name\": \"IPv6 VIP\",
-                    \"value\": \"\`${VIPV6}\`\",
-                    \"inline\": true
-                },
-                {
-                    \"name\": \"IPv4 Address\",
-                    \"value\": \"\`${IPV4:-unknown}\`\",
-                    \"inline\": true
-                },
-                {
-                    \"name\": \"IPv6 Address\",
-                    \"value\": \"\`${IPV6:-unknown}\`\",
-                    \"inline\": true
+                    \"name\": \"🔗 VIRTUAL IPs\",
+                    \"value\": \"\`\`\`text\nIPv4        : ${VIPV4}\nIPv6        : ${VIPV6}\n\`\`\`\",
+                    \"inline\": false
                 }
             ],
             \"footer\": {
-                \"text\": \"Keepalived / Pi-hole HA\"
+                \"text\": \"Pi-hole HA • Keepalived\"
             },
             \"timestamp\": \"${TIMESTAMP}\"
         }]
