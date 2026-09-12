@@ -25,10 +25,9 @@ INTERFACE="$(
 
 
 # ============================================================
-# Keepalived configuration
+# Read VRRP instance
 # ============================================================
 
-# Extract the complete vrrp_instance block
 VRRP_CONFIG="$(
     /usr/bin/awk -v instance="$INSTANCE" '
         $1 == "vrrp_instance" && $2 == instance {
@@ -45,6 +44,10 @@ VRRP_CONFIG="$(
     ' "$KEEPALIVED_CONF"
 )"
 
+if [[ -z "$VRRP_CONFIG" ]]; then
+    exit 0
+fi
+
 
 # ============================================================
 # Priority
@@ -52,7 +55,12 @@ VRRP_CONFIG="$(
 
 PRIORITY="$(
     printf '%s\n' "$VRRP_CONFIG" |
-    /usr/bin/awk '$1 == "priority" { print $2; exit }'
+    /usr/bin/awk '
+        $1 == "priority" {
+            print $2
+            exit
+        }
+    '
 )"
 
 PRIORITY="${PRIORITY:-unknown}"
@@ -62,7 +70,6 @@ PRIORITY="${PRIORITY:-unknown}"
 # Virtual IPs
 # ============================================================
 
-# IPv4 VIPs
 VIPV4="$(
     printf '%s\n' "$VRRP_CONFIG" |
     /usr/bin/awk '
@@ -71,7 +78,7 @@ VIPV4="$(
             next
         }
 
-        in_vip && /^}/ {
+        in_vip && $1 == "}" {
             exit
         }
 
@@ -81,7 +88,6 @@ VIPV4="$(
     '
 )"
 
-# IPv6 VIPs
 VIPV6="$(
     printf '%s\n' "$VRRP_CONFIG" |
     /usr/bin/awk '
@@ -90,7 +96,7 @@ VIPV6="$(
             next
         }
 
-        in_vip && /^}/ {
+        in_vip && $1 == "}" {
             exit
         }
 
@@ -102,87 +108,63 @@ VIPV6="$(
 
 
 # ============================================================
-# Local IP addresses
+# Local IPv4 addresses
 #
-# Excluded:
-#   - IPv4 loopback
-#   - IPv6 link-local
-#   - all configured VRRP VIPs
+# Excludes:
+#   - 127.0.0.0/8
+#   - all configured VRRP IPv4 addresses
 # ============================================================
 
 IPV4="$(
     /sbin/ip -4 -o addr show dev "$INTERFACE" |
-    /usr/bin/awk '$3 == "inet" && $4 !~ /^127\./ { print $4 }' |
+    /usr/bin/awk '
+        $3 == "inet" && $4 !~ /^127\./ {
+            print $4
+        }
+    ' |
     while read -r IP; do
-
-        if ! printf '%s\n' "$VIPV4" | grep -Fxq "$IP"; then
-            echo "$IP"
+        if ! printf '%s\n' "$VIPV4" | /usr/bin/grep -Fxq "$IP"; then
+            printf '%s\n' "$IP"
         fi
-
     done
 )"
+
+
+# ============================================================
+# Local IPv6 addresses
+#
+# Excludes:
+#   - fe80::/10
+#   - all configured VRRP IPv6 addresses
+# ============================================================
 
 IPV6="$(
     /sbin/ip -6 -o addr show dev "$INTERFACE" |
-    /usr/bin/awk '$3 == "inet6" && $4 !~ /^fe80:/ { print $4 }' |
+    /usr/bin/awk '
+        $3 == "inet6" && $4 !~ /^fe80:/ {
+            print $4
+        }
+    ' |
     while read -r IP; do
-
-        if ! printf '%s\n' "$VIPV6" | grep -Fxq "$IP"; then
-            echo "$IP"
+        if ! printf '%s\n' "$VIPV6" | /usr/bin/grep -Fxq "$IP"; then
+            printf '%s\n' "$IP"
         fi
-
     done
 )"
 
 
 # ============================================================
-# Format IP addresses
+# Defaults
 # ============================================================
 
-if [[ -n "$IPV4" ]]; then
-    IPV4="$(
-        printf '%s\n' "$IPV4" |
-        /usr/bin/sed 's/^/            /'
-    )"
-else
-    IPV4="            unknown"
-fi
-
-if [[ -n "$IPV6" ]]; then
-    IPV6="$(
-        printf '%s\n' "$IPV6" |
-        /usr/bin/sed 's/^/            /'
-    )"
-else
-    IPV6="            unknown"
-fi
+IPV4="${IPV4:-unknown}"
+IPV6="${IPV6:-unknown}"
+VIPV4="${VIPV4:-none}"
+VIPV6="${VIPV6:-none}"
 
 
 # ============================================================
-# Format Virtual IPs
-# ============================================================
-
-if [[ -n "$VIPV4" ]]; then
-    VIPV4="$(
-        printf '%s\n' "$VIPV4" |
-        /usr/bin/sed 's/^/            /'
-    )"
-else
-    VIPV4="            none"
-fi
-
-if [[ -n "$VIPV6" ]]; then
-    VIPV6="$(
-        printf '%s\n' "$VIPV6" |
-        /usr/bin/sed 's/^/            /'
-    )"
-else
-    VIPV6="            none"
-fi
-
-
-# ============================================================
-# Keepalived state
+# State
 # ============================================================
 
 case "$STATE" in
@@ -209,6 +191,31 @@ esac
 
 
 # ============================================================
+# Format lists for Discord
+# ============================================================
+
+IPV4_DISPLAY="$(
+    printf '%s\n' "$IPV4" |
+    /usr/bin/sed 's/^/            /'
+)"
+
+IPV6_DISPLAY="$(
+    printf '%s\n' "$IPV6" |
+    /usr/bin/sed 's/^/            /'
+)"
+
+VIPV4_DISPLAY="$(
+    printf '%s\n' "$VIPV4" |
+    /usr/bin/sed 's/^/            /'
+)"
+
+VIPV6_DISPLAY="$(
+    printf '%s\n' "$VIPV6" |
+    /usr/bin/sed 's/^/            /'
+)"
+
+
+# ============================================================
 # Timestamp
 # ============================================================
 
@@ -224,57 +231,33 @@ TIMESTAMP="$(
 /usr/bin/curl -sS -X POST "$WEBHOOK_URL" \
     -H "Content-Type: application/json" \
     -d "{
-        \"embeds\": [
-            {
-                \"title\": \"${TITLE}\",
-                \"description\": \"${DESCRIPTION}\",
-                \"color\": ${COLOR},
+        \"embeds\": [{
+            \"title\": \"${TITLE}\",
+            \"description\": \"${DESCRIPTION}\",
+            \"color\": ${COLOR},
 
-                \"fields\": [
-
-                    {
-                        \"name\": \"📊 STATUS\",
-                        \"value\": \"\`\`\`text
-State       : ${STATUS}
-Host        : ${HOST}
-Interface   : ${INTERFACE}
-VRRP        : ${INSTANCE}
-Priority    : ${PRIORITY}
-\`\`\`\",
-                        \"inline\": false
-                    },
-
-                    {
-                        \"name\": \"🌐 IP ADDRESSES\",
-                        \"value\": \"\`\`\`text
-IPv4
-${IPV4}
-
-IPv6
-${IPV6}
-\`\`\`\",
-                        \"inline\": false
-                    },
-
-                    {
-                        \"name\": \"🔗 VIRTUAL IPs\",
-                        \"value\": \"\`\`\`text
-IPv4
-${VIPV4}
-
-IPv6
-${VIPV6}
-\`\`\`\",
-                        \"inline\": false
-                    }
-
-                ],
-
-                \"footer\": {
-                    \"text\": \"Pi-hole HA • Keepalived\"
+            \"fields\": [
+                {
+                    \"name\": \"📊 STATUS\",
+                    \"value\": \"\`\`\`text\nState       : ${STATUS}\nHost        : ${HOST}\nInterface   : ${INTERFACE}\nVRRP        : ${INSTANCE}\nPriority    : ${PRIORITY}\n\`\`\`\",
+                    \"inline\": false
                 },
+                {
+                    \"name\": \"🌐 IP ADDRESSES\",
+                    \"value\": \"\`\`\`text\nIPv4\n${IPV4_DISPLAY}\n\nIPv6\n${IPV6_DISPLAY}\n\`\`\`\",
+                    \"inline\": false
+                },
+                {
+                    \"name\": \"🔗 VIRTUAL IPs\",
+                    \"value\": \"\`\`\`text\nIPv4\n${VIPV4_DISPLAY}\n\nIPv6\n${VIPV6_DISPLAY}\n\`\`\`\",
+                    \"inline\": false
+                }
+            ],
 
-                \"timestamp\": \"${TIMESTAMP}\"
-            }
-        ]
+            \"footer\": {
+                \"text\": \"Pi-hole HA • Keepalived\"
+            },
+
+            \"timestamp\": \"${TIMESTAMP}\"
+        }]
     }"
