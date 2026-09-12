@@ -57,22 +57,15 @@ DEFAULT_INTERFACE="${DEFAULT_INTERFACE:-unknown}"
 # ============================================================================
 # Parse all VRRP instances
 #
-# Expected structure:
+# Output format:
 #
-# vrrp_instance PIHOLE_V4 {
-#     state MASTER
-#     interface eth0
-#     virtual_router_id 51
-#     priority 150
+# INSTANCE|STATE|INTERFACE|VRID|PRIORITY|VIP4|VIP6
 #
-#     virtual_ipaddress {
-#         10.5.5.2/24
-#     }
-# }
+# Example:
 #
-# vrrp_instance PIHOLE_V6 {
-#     ...
-# }
+# PIHOLE_V4|MASTER|eth0|51|150|10.5.5.2/24|
+# PIHOLE_V6|MASTER|eth0|52|150||fd00:5::2/64
+#
 # ============================================================================
 
 VRRP_DATA="$(
@@ -82,7 +75,10 @@ VRRP_DATA="$(
             return s
         }
 
+        # --------------------------------------------------------------------
         # New VRRP instance
+        # --------------------------------------------------------------------
+
         /^[[:space:]]*vrrp_instance[[:space:]]+/ {
             if (instance != "")
                 print instance "|" state "|" interface "|" vrid "|" priority "|" vip4 "|" vip6
@@ -96,17 +92,19 @@ VRRP_DATA="$(
             priority=""
             vip4=""
             vip6=""
+
             in_instance=1
             instance_depth=0
             in_vip=0
+
             next
         }
 
         in_instance {
 
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
             # Track braces
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
 
             line=$0
 
@@ -116,9 +114,9 @@ VRRP_DATA="$(
             instance_depth += opens
             instance_depth -= closes
 
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
             # Basic VRRP parameters
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
 
             if ($1 == "state")
                 state=$2
@@ -132,9 +130,9 @@ VRRP_DATA="$(
             if ($1 == "priority")
                 priority=$2
 
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
             # virtual_ipaddress block
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
 
             if ($1 == "virtual_ipaddress" && $2 == "{") {
                 in_vip=1
@@ -167,9 +165,9 @@ VRRP_DATA="$(
                 }
             }
 
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
             # End of VRRP instance
-            # ------------------------------------------------------------
+            # ----------------------------------------------------------------
 
             if (instance_depth <= 0 && $0 ~ /}/) {
                 print instance "|" state "|" interface "|" vrid "|" priority "|" vip4 "|" vip6
@@ -181,6 +179,7 @@ VRRP_DATA="$(
                 priority=""
                 vip4=""
                 vip6=""
+
                 in_instance=0
                 in_vip=0
             }
@@ -197,6 +196,44 @@ VRRP_DATA="$(
 VRRP_DATA="$(
     printf '%s\n' "$VRRP_DATA" |
         sed '/^[[:space:]]*$/d'
+)"
+
+# ============================================================================
+# Build lists of configured VRRP VIPs
+#
+# These lists are used for:
+#   1. Excluding VRRP VIPs from NETWORK
+#   2. Detecting which configured VIPs are actually active
+# ============================================================================
+
+CONFIGURED_VIPV4="$(
+    printf '%s\n' "$VRRP_DATA" |
+        awk -F'|' '
+            {
+                if ($6 != "") {
+                    n = split($6, vips, ", ")
+
+                    for (i = 1; i <= n; i++)
+                        if (vips[i] != "")
+                            print vips[i]
+                }
+            }
+        '
+)"
+
+CONFIGURED_VIPV6="$(
+    printf '%s\n' "$VRRP_DATA" |
+        awk -F'|' '
+            {
+                if ($7 != "") {
+                    n = split($7, vips, ", ")
+
+                    for (i = 1; i <= n; i++)
+                        if (vips[i] != "")
+                            print vips[i]
+                }
+            }
+        '
 )"
 
 # ============================================================================
@@ -237,14 +274,39 @@ VRRP_STATUS="${VRRP_STATUS:-unknown}"
 
 # ============================================================================
 # Local IPv4 addresses
+#
+# Show only real/local interface addresses.
+# All configured VRRP IPv4 VIPs are excluded dynamically.
 # ============================================================================
 
 IPV4="$(
     ip -4 -o addr show scope global 2>/dev/null |
-        awk '
+        awk -v vips="$CONFIGURED_VIPV4" '
+            BEGIN {
+                n = split(vips, list, "\n")
+
+                for (i = 1; i <= n; i++) {
+                    vip = list[i]
+
+                    if (vip != "") {
+                        # Remove CIDR prefix.
+                        sub(/\/.*/, "", vip)
+                        vrrp_vip[vip] = 1
+                    }
+                }
+            }
+
             {
-                interface=$2
-                address=$4
+                interface = $2
+                address = $4
+
+                # Remove CIDR prefix for comparison.
+                ip = address
+                sub(/\/.*/, "", ip)
+
+                # Skip VRRP VIP.
+                if (ip in vrrp_vip)
+                    next
 
                 printf "%s: %s\n", interface, address
             }
@@ -256,14 +318,39 @@ IPV4="${IPV4:-none}"
 
 # ============================================================================
 # Local IPv6 addresses
+#
+# Show only real/local interface addresses.
+# All configured VRRP IPv6 VIPs are excluded dynamically.
 # ============================================================================
 
 IPV6="$(
     ip -6 -o addr show scope global 2>/dev/null |
-        awk '
+        awk -v vips="$CONFIGURED_VIPV6" '
+            BEGIN {
+                n = split(vips, list, "\n")
+
+                for (i = 1; i <= n; i++) {
+                    vip = list[i]
+
+                    if (vip != "") {
+                        # Remove CIDR prefix.
+                        sub(/\/.*/, "", vip)
+                        vrrp_vip[vip] = 1
+                    }
+                }
+            }
+
             {
-                interface=$2
-                address=$4
+                interface = $2
+                address = $4
+
+                # Remove CIDR prefix for comparison.
+                ip = address
+                sub(/\/.*/, "", ip)
+
+                # Skip VRRP VIP.
+                if (ip in vrrp_vip)
+                    next
 
                 printf "%s: %s\n", interface, address
             }
@@ -274,33 +361,118 @@ IPV6="$(
 IPV6="${IPV6:-none}"
 
 # ============================================================================
-# Currently active VRRP VIPs
+# Currently active VRRP IPv4 VIPs
 #
-# This is intentionally taken from "ip addr", not only from the config.
-# This tells us which VIPs are ACTUALLY present on the current node.
+# Compare the configured VIPs against the addresses currently assigned
+# to the system. Only VIPs that are actually present are displayed.
 # ============================================================================
 
 ACTIVE_VIPV4="$(
-    ip -4 -o addr show 2>/dev/null |
-        awk '
-            /scope global/ && /10\.5\.5\.2\// {
-                print $4
-            }
-        ' |
-        paste -sd ', ' -
-)"
+    ip -4 -o addr show scope global 2>/dev/null |
+        awk -v vips="$CONFIGURED_VIPV4" '
+            BEGIN {
+                n = split(vips, list, "\n")
 
-ACTIVE_VIPV6="$(
-    ip -6 -o addr show 2>/dev/null |
-        awk '
-            /scope global/ && /fd00:5::2\// {
-                print $4
+                for (i = 1; i <= n; i++) {
+                    vip = list[i]
+
+                    if (vip != "") {
+                        # Keep the complete CIDR representation.
+                        configured[vip] = 1
+
+                        # Also create a version without CIDR.
+                        plain = vip
+                        sub(/\/.*/, "", plain)
+                        configured_plain[plain] = vip
+                    }
+                }
             }
-        ' |
-        paste -sd ', ' -
+
+            {
+                address = $4
+
+                # Remove CIDR prefix.
+                ip = address
+                sub(/\/.*/, "", ip)
+
+                if (ip in configured_plain)
+                    active[configured_plain[ip]] = 1
+            }
+
+            END {
+                first = 1
+
+                for (vip in active) {
+                    if (!first)
+                        printf ", "
+
+                    printf "%s", vip
+                    first = 0
+                }
+
+                if (!first)
+                    printf "\n"
+            }
+        '
 )"
 
 ACTIVE_VIPV4="${ACTIVE_VIPV4:-none}"
+
+# ============================================================================
+# Currently active VRRP IPv6 VIPs
+#
+# Compare the configured VIPs against the addresses currently assigned
+# to the system. Only VIPs that are actually present are displayed.
+# ============================================================================
+
+ACTIVE_VIPV6="$(
+    ip -6 -o addr show scope global 2>/dev/null |
+        awk -v vips="$CONFIGURED_VIPV6" '
+            BEGIN {
+                n = split(vips, list, "\n")
+
+                for (i = 1; i <= n; i++) {
+                    vip = list[i]
+
+                    if (vip != "") {
+                        configured[vip] = 1
+
+                        # Also create a version without CIDR.
+                        plain = vip
+                        sub(/\/.*/, "", plain)
+                        configured_plain[plain] = vip
+                    }
+                }
+            }
+
+            {
+                address = $4
+
+                # Remove CIDR prefix.
+                ip = address
+                sub(/\/.*/, "", ip)
+
+                if (ip in configured_plain)
+                    active[configured_plain[ip]] = 1
+            }
+
+            END {
+                first = 1
+
+                for (vip in active) {
+                    if (!first)
+                        printf ", "
+
+                    printf "%s", vip
+                    first = 0
+                }
+
+                if (!first)
+                    printf "\n"
+            }
+        '
+)"
+
 ACTIVE_VIPV6="${ACTIVE_VIPV6:-none}"
 
 # ============================================================================
